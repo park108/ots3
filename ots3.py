@@ -4,12 +4,20 @@ from boto3.s3.transfer import S3Transfer
 from optparse import OptionParser
 import configparser
 import cx_Oracle
-from datetime import datetime
+from datetime import date, datetime
 import gzip
-import csv
+import csv, json
+from json import dumps
 
 # execution
-# python3 code.py
+# python3 ots3.py -c default
+
+def json_serial(obj):
+    """JSON serializer for objects not serializable by default json code"""
+
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError ("Type %s not serializable" % type(obj))
 
 if __name__ == "__main__":
 
@@ -17,6 +25,15 @@ if __name__ == "__main__":
 
 	print ("################################################")
 	print ("Oracle to S3")
+	print ("  Strat at {}".format(start_time))
+	
+	################################################
+	# Parsing arguments
+	################################################
+	parser = OptionParser()
+	parser.add_option("-c", "--setting_section", dest="config_section", default="default", help="Config section name")
+	(options, args) = parser.parse_args()
+	
 	
 	################################################
 	# Parsing setting parameters
@@ -24,17 +41,21 @@ if __name__ == "__main__":
 	config = configparser.ConfigParser()
 	config.read("./settings.conf")
 
-	ora_host = config.get("default", "ora_host")
-	ora_id = config.get("default", "ora_id")
-	ora_password = config.get("default", "ora_password")
-	ora_database = config.get("default", "ora_database")
+	print ("  Setting section: " + options.config_section)
+	ora_host = config.get(options.config_section, "ora_host")
+	ora_port = config.get(options.config_section, "ora_port")
+	ora_id = config.get(options.config_section, "ora_id")
+	ora_password = config.get(options.config_section, "ora_password")
+	ora_database = config.get(options.config_section, "ora_database")
 
-	aws_access_key_id = config.get("default", "aws_access_key_id")
-	aws_secret_access_key = config.get("default", "aws_secret_access_key")
-	aws_s3_bucket = config.get("default", "aws_s3_bucket")
+	aws_access_key_id = config.get(options.config_section, "aws_access_key_id")
+	aws_secret_access_key = config.get(options.config_section, "aws_secret_access_key")
+	aws_s3_bucket = config.get(options.config_section, "aws_s3_bucket")
 
-	query_file = config.get("default", "query_file")
-	output_file_name = config.get("default", "output_file_name")
+	query_file = config.get(options.config_section, "query_file")
+	output_file_type = config.get(options.config_section, "output_file_type")
+	output_file_name = config.get(options.config_section, "output_file_name")
+	delimiter = config.get(options.config_section, "delimiter")
 
 
 	################################################
@@ -43,11 +64,12 @@ if __name__ == "__main__":
 	print ("################################################")
 	print ("[Query]")
 
-	ora_host_db = ora_host + "/" + ora_database
+	ora_host_db = ora_host + ":" + ora_port + "/" + ora_database
 	print ("  Connect to oracle database... " + ora_host_db)
 
-	os.environ["NLS_LANG"] = ".AL32UTF8" # for use Unicode
-	ora_conn = cx_Oracle.connect(ora_id, ora_password, ora_host_db)
+	os.environ["NLS_LANG"] = "AMERICAN_AMERICA.AL32UTF8"
+	ora_conn = cx_Oracle.connect(ora_id, ora_password, ora_host_db
+		, nencoding = "AL16UTF16")
 	print ("  Connection established.")
 
 	query = open(query_file, "r").read().strip().strip(";")
@@ -56,6 +78,23 @@ if __name__ == "__main__":
 	cursor = ora_conn.cursor()
 	cursor.execute(query)
 	print ('    Query executed.')
+
+	fetch_start = datetime.now()
+	print ("    Fetch data...")
+	results = ""
+	try:
+		results = cursor.fetchall()
+	except cx_Oracle.DatabaseError as exc:
+		error, = exc.args
+		print ("      Oracle-Error-Code:", error.code)
+		print ("      Oracle-Error-Message:", error.message)
+		fetch_end = datetime.now()
+		print ('      Elapsed time: {}'.format(fetch_end - fetch_start))
+		print ("* Program terminated")
+		sys.exit()
+	row_count = len(results)
+	fetch_end = datetime.now()
+	print ('      Elapsed time: {}'.format(fetch_end - fetch_start))
 
 	query_time = datetime.now();
 	print ('* Elapsed time: {}'.format(query_time - start_time))
@@ -66,27 +105,28 @@ if __name__ == "__main__":
 	################################################
 	print ("################################################")
 	print ("[Create file]")
-	filename = output_file_name + ".csv.gzip"
-	print ("  Cursor data to local file >> " + filename)
 
-	file = gzip.open(filename, "wt", encoding="utf-8", newline="\n")
-	csv_writer = csv.writer(file, dialect='excel')
+	filename = output_file_name
+	if output_file_type == 'csv':
+		filename += ".csv.gzip"
+	elif output_file_type == 'json':
+		filename += ".json.gzip"
 
-	str_data = ""
-	str_len = 0
-	original_str_length = 0
-	row_count = 0
+	print ("  Fetched data to local file >> " + filename)
 
-	print ("  Fetch data...")
-	fetch_start = datetime.now()
-	results = cursor.fetchall()
-	row_count = len(results)
-	fetch_end = datetime.now()
-	print ('    Elapsed time: {}'.format(fetch_end - fetch_start))
+	file = gzip.open(filename, "wt", encoding="utf8", newline="\n")
 
-	print ("  Convert to CSV...")
 	convert_start = datetime.now()
-	csv_writer.writerows(results)
+
+	if output_file_type == 'csv':
+		print ("  Convert to CSV...")
+		csv_writer = csv.writer(file, dialect='excel', delimiter=delimiter)
+		csv_writer.writerows(results)
+	elif output_file_type == 'json':
+		print ("  Convert to JSON...")
+		json_dump = json.dumps(results, default=json_serial, ensure_ascii=False, indent=2)
+		file.write(json_dump)
+
 	convert_end = datetime.now()
 	print ('    Elapsed time: {}'.format(convert_end - convert_start))
 
